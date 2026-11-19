@@ -17,6 +17,7 @@ from robusta.core.playbooks.trigger import Trigger
 from robusta.core.reporting import MarkdownBlock
 from robusta.core.reporting.base import Finding
 from robusta.core.reporting.consts import SYNC_RESPONSE_SINK
+from robusta.core.sinks.sink_dispatcher import SinkDispatcher
 from robusta.core.sinks.robusta.dal.model_conversion import ModelConversion
 from robusta.integrations.kubernetes.base_triggers import K8sBaseTrigger
 from robusta.model.alert_relabel_config import AlertRelabel
@@ -32,6 +33,10 @@ playbooks_errors_count = prometheus_client.Counter(
 playbooks_summary = prometheus_client.Summary(
     "playbooks_process_time", "Total playbooks process time (seconds)", labelnames=("source",)
 )
+
+# Bounded retry/metrics policy shared by every finding dispatch. Sink selection
+# (routing) stays in the event handler; only the send mechanics are delegated.
+sink_dispatcher = SinkDispatcher()
 
 
 class PlaybooksEventHandlerImpl(PlaybooksEventHandler):
@@ -306,24 +311,24 @@ class PlaybooksEventHandlerImpl(PlaybooksEventHandler):
                 try:
                     sink = self.registry.get_sinks().sinks.get(sink_name)
                     if not sink:
-                        logging.error(f"sink {sink_name} not found. Skipping event finding {finding}")
+                        # The sink may have been removed/renamed by a config reload while
+                        # this finding was in flight. Meter it instead of dropping silently.
+                        SinkDispatcher.report_missing_sink(sink_name, 1)
                         continue
 
                     # only write the finding if is matching against the sink matchers
                     if sink.accepts(finding):
-                        try:
-                            # create deep copy, so that iterating on one sink enrichments won't affect the others
-                            # Each sink has a different findings, but enrichments are shared
-                            finding_copy = copy.deepcopy(finding)
-                            sink.write_finding(finding_copy, self.registry.get_sinks().platform_enabled)
+                        # create deep copy, so that iterating on one sink enrichments won't affect the others
+                        # Each sink has a different findings, but enrichments are shared
+                        finding_copy = copy.deepcopy(finding)
+                        sent_ok = sink_dispatcher.send_to_sink(
+                            sink, finding_copy, self.registry.get_sinks().platform_enabled
+                        )
 
+                        if sent_ok:
                             sink_info = sinks_info[sink_name]
                             sink_info.type = sink.__class__.__name__
                             sink_info.findings_count += 1
-                        except Exception:  # if we have an error, we should still respect stop
-                            logging.exception(
-                                f"Failed to send finding {finding.aggregation_key} to sink {sink.sink_name}"
-                            )
 
                         if sink.params.stop:
                             return

@@ -1,3 +1,4 @@
+import logging
 import threading
 import time
 from abc import abstractmethod, ABC
@@ -178,6 +179,38 @@ class SinkBase(ABC):
         cluster_name = global_config.get("cluster_name", "")
         signing_key = global_config.get("signing_key", "")
         return self.account_id != account_id or self.cluster_name != cluster_name or self.signing_key != signing_key
+
+    def migrate_grouping_state(self, new_sink: "SinkBase") -> bool:
+        """Move in-memory notification accounting onto a sink recreated by a reload.
+
+        Only invoked when both sinks have grouping enabled and their grouping
+        configuration is unchanged, so existing group keys keep their meaning.
+        Returns True when state was migrated. A sink whose grouping changed
+        starts with fresh state on purpose - the old thresholds no longer apply.
+        """
+        if not (self.grouping_enabled and new_sink.grouping_enabled):
+            return False
+        if self.params.grouping != new_sink.params.grouping:
+            logging.info(
+                "Grouping configuration of sink %s changed; resetting notification state on reload",
+                self.sink_name,
+            )
+            return False
+
+        old_lock = getattr(self, "finding_group_lock", None)
+        new_lock = getattr(new_sink, "finding_group_lock", None)
+        if old_lock is None or new_lock is None:
+            return False
+
+        with old_lock, new_lock:
+            if self.grouping_summary_mode and new_sink.grouping_summary_mode:
+                new_sink.summaries = self.summaries
+            elif not self.grouping_summary_mode and not new_sink.grouping_summary_mode:
+                new_sink.groups = self.groups
+            else:
+                return False
+        logging.info("Migrated notification grouping state of sink %s across config reload", self.sink_name)
+        return True
 
     def stop(self):
         pass

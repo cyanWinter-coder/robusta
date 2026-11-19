@@ -44,14 +44,17 @@ class TaskQueue(Queue):
         self.metrics.size_callback(self.name, lambda: self._qsize())
         self.__start_workers()
 
-    def add_task(self, task, *args, **kwargs):
+    def add_task(self, task, *args, **kwargs) -> bool:
+        """Queue a task. Returns True if queued, False if the queue was full."""
         args = args or ()
         kwargs = kwargs or {}
         try:
             self.put((task, args, kwargs), block=False)
             self.metrics.on_queued(self.name)
+            return True
         except Full:
             self.metrics.on_rejected(self.name)
+            return False
 
     def __start_workers(self):
         for i in range(self.num_workers):

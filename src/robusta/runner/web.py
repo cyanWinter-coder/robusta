@@ -1,17 +1,14 @@
-import hashlib
 import logging
-import threading
 from datetime import datetime
-from typing import List
 
-from cachetools import TTLCache
 from flask import Flask, abort, jsonify, request
 from prometheus_client import make_wsgi_app
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 
 from robusta.clients.robusta_client import fetch_runner_info
+from robusta.core.alerts.alert_deduplicator import AlertDedupDecision, AlertDeduplicator
 from robusta.core.model.env_vars import NUM_EVENT_THREADS, PORT, TRACE_INCOMING_ALERTS, TRACE_INCOMING_REQUESTS, \
-    PROCESSED_ALERTS_CACHE_TTL, PROCESSED_ALERTS_CACHE_MAX_SIZE, RUNNER_VERSION, RUNNER_BIND_ADDR, ENABLE_TELEMETRY
+    RUNNER_VERSION, RUNNER_BIND_ADDR, ENABLE_TELEMETRY
 from robusta.core.playbooks.playbooks_event_handler import PlaybooksEventHandler
 from robusta.core.triggers.helm_releases_triggers import HelmReleasesTriggerEvent, IncomingHelmReleasesEventPayload
 from robusta.integrations.kubernetes.base_triggers import IncomingK8sEventPayload, K8sTriggerEvent
@@ -26,14 +23,16 @@ app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {"/metrics": make_wsgi_app()})
 
 
 class Web:
-    api_server_queue: TaskQueue
-    alerts_queue: TaskQueue
-    event_handler: PlaybooksEventHandler
-    metrics: QueueMetrics
-    loader: ConfigLoader
+    api_server_queue: TaskQueue = None
+    alerts_queue: TaskQueue = None
+    event_handler: PlaybooksEventHandler = None
+    metrics: QueueMetrics = None
+    loader: ConfigLoader = None
 
-    processed_alerts_cache = TTLCache(maxsize=PROCESSED_ALERTS_CACHE_MAX_SIZE, ttl=PROCESSED_ALERTS_CACHE_TTL)
-    processed_alerts_cache_lock = threading.Lock()
+    # Core-side ingress dedup. Kept here (not in playbooks) so that exactly one
+    # playbook run happens per distinct alert occurrence, regardless of
+    # AlertManager redelivery and concurrent config/rule reloads.
+    alert_deduplicator = AlertDeduplicator()
 
     @staticmethod
     def init(event_handler: PlaybooksEventHandler, loader: ConfigLoader):
@@ -91,30 +90,32 @@ class Web:
         alert_manager_event = AlertManagerEvent(**req_json)
         for alert in alert_manager_event.alerts:
             alert = Web._relabel_alert(alert)
-            alert_hash = Web.get_compound_hash([
-                alert.fingerprint.encode('ascii'),
-                alert.status.encode('utf-8'),
-                str(alert.startsAt.timestamp()).encode('ascii'),
-                str(alert.endsAt.timestamp()).encode('ascii'),
-            ])
-            with Web.processed_alerts_cache_lock:
-                if alert_hash in Web.processed_alerts_cache:
-                    continue
-                else:
-                    Web.processed_alerts_cache[alert_hash] = True
-            Web.alerts_queue.add_task(
+            # Dedup at the core ingress: identical AlertManager redeliveries never
+            # reach the playbooks layer. register() reserves an in-flight slot that
+            # is only converted into a "processed" entry once the alert is queued.
+            decision = Web.alert_deduplicator.register(alert)
+            if decision != AlertDedupDecision.ACCEPT:
+                logging.debug(
+                    "Suppressing %s alert %s (dedup decision: %s)",
+                    alert.status,
+                    alert.fingerprint,
+                    decision.value,
+                )
+                continue
+
+            queued = Web.alerts_queue.add_task(
                 Web.event_handler.handle_trigger, PrometheusTriggerEvent(alert=alert)
             )
+            if queued:
+                Web.alert_deduplicator.complete(alert)
+            else:
+                # Queue is full: release the in-flight marker without marking the
+                # alert as processed, so an AlertManager redelivery is retried
+                # instead of being silently dropped for the whole TTL window.
+                Web.alert_deduplicator.requeue_failed(alert)
 
         Web.event_handler.get_telemetry().last_alert_at = str(datetime.now())
         return jsonify(success=True)
-
-    @staticmethod
-    def get_compound_hash(data: List[bytes]) -> bytes:
-        hash_value = hashlib.sha1()
-        for item in data:
-            hash_value.update(hashlib.sha1(item).digest())
-        return hash_value.digest()
 
     @staticmethod
     @app.route("/api/helm-releases", methods=["POST"])

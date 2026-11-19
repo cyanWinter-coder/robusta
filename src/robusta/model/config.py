@@ -84,7 +84,13 @@ class SinksRegistry:
                     config_change_msg = "due to global config change" if is_global_config_changed else "due to param change"
                     logging.info(f"Updating {type(sink_config)} sink named {sink_config.get_name()} {config_change_msg}")
                     exists_sink.stop()
-                    new_sinks[sink_name] = SinkFactory.create_sink(sink_config, registry)
+                    new_sink = SinkFactory.create_sink(sink_config, registry)
+                    # Preserve in-memory notification accounting (group/summary state)
+                    # when the grouping configuration itself did not change. Without
+                    # this, a rule reload resets ignore_first thresholds and re-sends
+                    # notifications that were already grouped before the reload.
+                    cls._migrate_grouping_state(exists_sink, new_sink)
+                    new_sinks[sink_name] = new_sink
                     continue
 
                 logging.info("Sink %s not changed", sink_name)
@@ -100,6 +106,17 @@ class SinksRegistry:
                 # Skip this sink if continue_on_sink_errors is True
 
         return new_sinks, has_sink_errors
+
+    @staticmethod
+    def _migrate_grouping_state(old_sink: SinkBase, new_sink: SinkBase) -> None:
+        try:
+            old_sink.migrate_grouping_state(new_sink)
+        except Exception:
+            # State migration is an optimization; a failure must not abort the reload.
+            logging.error(
+                f"Failed to migrate grouping state from sink {old_sink.sink_name}; starting fresh",
+                exc_info=True,
+            )
 
 
 class PlaybooksRegistry:

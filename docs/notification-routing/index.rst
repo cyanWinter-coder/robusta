@@ -9,6 +9,7 @@ Notifications & Routing Overview
 
    routing-with-scopes
    notification-grouping
+   alert-delivery-and-deduplication
    routing-silencing
    routing-by-namespace
    routing-by-severity
@@ -30,6 +31,8 @@ Key Concepts
 :doc:`Routing <routing-with-scopes>` - Rules that determine which alerts go to which sinks
 
 :doc:`Grouping <notification-grouping>` - Thread alerts together to reduce noise (especially in Slack)
+
+:doc:`Deduplication & delivery reliability <alert-delivery-and-deduplication>` - How redelivered alerts, sink failures and rule reloads are handled without duplicate or lost notifications
 
 :doc:`Silencing <routing-silencing>` - Temporarily disable specific notifications
 

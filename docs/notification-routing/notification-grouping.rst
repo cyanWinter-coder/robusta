@@ -115,3 +115,4 @@ For example, to filter out false positives and notify on ``ImagePullBackoff`` on
 Limitations
 ---------------
 Notification statistics are currently held in memory and will reset if the Robusta runner restarts.
+When sink configuration is reloaded without changing the ``grouping`` block, the grouping statistics of the rebuilt sink are preserved; changing the ``grouping`` configuration itself resets them. See :doc:`alert-delivery-and-deduplication` for the full alert delivery and reload semantics.

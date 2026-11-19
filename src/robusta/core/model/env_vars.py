@@ -169,6 +169,11 @@ NODE_IP_CACHE_TTL_SEC = int(os.environ.get("NODE_IP_CACHE_TTL_SEC", 15 * 60))
 PROCESSED_ALERTS_CACHE_TTL = int(os.environ.get("PROCESSED_ALERT_CACHE_TTL", 2 * 3600))
 PROCESSED_ALERTS_CACHE_MAX_SIZE = int(os.environ.get("PROCESSED_ALERTS_CACHE_MAX_SIZE", 100_000))
 
+# Bounded retry applied when a sink fails to send a finding. Retries happen inside the
+# alert worker, so the values stay conservative by default.
+SINK_SEND_MAX_ATTEMPTS = int(os.environ.get("SINK_SEND_MAX_ATTEMPTS", 3))
+SINK_SEND_RETRY_BACKOFF_SEC = float(os.environ.get("SINK_SEND_RETRY_BACKOFF_SEC", 1.0))
+
 POD_WAIT_RETRIES = int(os.environ.get("POD_WAIT_RETRIES", 10))
 POD_WAIT_RETRIES_SECONDS = int(os.environ.get("POD_WAIT_RETRIES_SECONDS", 5))
 
